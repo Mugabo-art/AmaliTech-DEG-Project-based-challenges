@@ -47,3 +47,34 @@ jobs:
       - run: |
           docker build -t 413724559765.dkr.ecr.eu-west-1.amazonaws.com/kora-analytics-api:${{ github.sha }} .
           docker push 413724559765.dkr.ecr.eu-west-1.amazonaws.com/kora-analytics-api:${{ github.sha }}
+
+    # Job 3: put the new image on the server. Runs only if the build succeeded.
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      # Log in to AWS (needed to open and close the SSH door on the firewall)
+      - uses: aws-actions/configure-aws-credentials@v5
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-west-1
+
+      # Find this runner's own internet address and write it down for later steps
+      - run: echo "RUNNER_IP=$(curl -s https://checkip.amazonaws.com)" >> $GITHUB_ENV
+
+      # Open port 22 on the firewall for this runner's address only (/32)
+      - run: aws ec2 authorize-security-group-ingress --group-id sg-0658a1bd6a8235984 --protocol tcp --port 22 --cidr $RUNNER_IP/32
+
+
+      # Save the server key from GitHub secrets into a file that ssh can use
+      - run: |
+          echo "${{ secrets.EC2_SSH_KEY }}" > key.pem
+          chmod 600 key.pem
+
+      # Test the login by running one harmless command on the server
+      - run: ssh -i key.pem -o StrictHostKeyChecking=accept-new ubuntu@${{ secrets.EC2_HOST }} "echo Connected to the server"
+
+      # Always lock the door again, even if an earlier step failed
+      - if: always()
+        run: aws ec2 revoke-security-group-ingress --group-id sg-0658a1bd6a8235984 --protocol tcp --port 22 --cidr $RUNNER_IP/32
