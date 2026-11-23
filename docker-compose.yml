@@ -1,0 +1,10 @@
+services:
+  api:
+    build: .
+    image: kora-analytics-api
+    init: true
+    environment:
+      - PORT=3000
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
