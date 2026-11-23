@@ -1,151 +1,90 @@
-# DeployReady
+# Kora Analytics API: DeployReady
 
-This challenge is designed for associate-level DevOps candidates. It is intentionally harder than an entry-level deployment exercise and tests your ability to handle containerisation, automated pipelines, cloud deployment, and safe release practices end to end.
+My solution to the AmaliTech **DeployReady** DevOps challenge.
 
----
+Kora Analytics used to deploy by hand: SSH into the server, pull the code, restart the process, with no tests and no way to know a deploy had broken something. This repository replaces that with a containerised app and an automated, tested, self-checking deployment to AWS.
 
-## 1. Business Context
+**Live:** `http://34.244.170.53/health` returns `{"status":"ok"}`
 
-**Client:** Kora Analytics
-**Industry:** SaaS - Data dashboards for logistics companies
-
-### The Problem
-
-Every time the Kora team wants to deploy a new version of their app, a developer manually SSHs into the server, pulls the code, and restarts the process by hand. There are no automated tests before a release and no way to tell if a deploy broke something until a customer complains.
-
-### Your Role
-
-You are joining as their first DevOps engineer. The application code already works, and your job is to **containerise it, automate the delivery pipeline, and get it running on a cloud platform** (AWS, GCP, Azure, or any other cloud provider you are familiar with).
+The application code in `app/` is unchanged. All my work is around it.
 
 ---
 
-## 2. The Application
+## Architecture overview
 
-A simple Node.js API is provided in the [`app/`](./app/) directory. It has three endpoints:
-
-| Method | Route      | Description                            |
-| ------ | ---------- | -------------------------------------- |
-| GET    | `/health`  | Returns `{ "status": "ok" }`           |
-| GET    | `/metrics` | Returns uptime and memory usage        |
-| POST   | `/data`    | Accepts a JSON body and echoes it back |
-
-Run it locally:
-
-```bash
-cd app
-npm install
-npm start
+```
+Developer pushes to main
+        │
+        ▼
+GitHub Actions  (.github/workflows/deploy.yml)
+  1. test    npm ci + npm test (4 tests)
+  2. build   docker build, tag = commit ID, push to Amazon ECR
+  3. deploy  open SSH for the runner's IP only
+             └─ on the server: tag current image "previous", pull new image,
+                docker compose up -d --no-build
+             health check http://<server>/health (10 tries)
+             └─ if it fails: put "previous" back (rollback) and fail the run
+             always close SSH again
+        │
+        ▼
+AWS eu-west-1
+  ECR repository  kora-analytics-api     (stores the images)
+  EC2 t3.micro    deployready-server     (Ubuntu 26.04 + Docker)
+    └─ container  kora-analytics-api     host port 80 → app port 3000
+  Security group  deployready-sg         80 open to all, 22 my IP only
 ```
 
-Do not change the application logic. Your work is everything around it.
+## What is in the repository
+
+| File | Purpose |
+|---|---|
+| `Dockerfile` | Builds the app image: Node 22 on Alpine, production libraries only, runs as the non-root `node` user, reads `PORT` |
+| `.dockerignore` | Keeps `node_modules`, `.env`, `.git` and `.pem` keys out of the image |
+| `docker-compose.yml` | Runs the app as the `api` service: ports and `PORT` from `.env`, clean shutdown (`init`), auto-restart, Docker health check, rotated logs |
+| `.env.example` | Template for the settings file (`PORT`, `HOST_PORT`). The real `.env` is never committed |
+| `.github/workflows/deploy.yml` | The pipeline: test, build, push, deploy, health check, rollback |
+| `DEPLOYMENT.md` | Cloud setup, IAM, how to check the container and read logs, observability, rollback bonus |
+
+## Run it locally
+
+Requires Docker.
+
+```bash
+cp .env.example .env          # on Windows: copy .env.example .env
+docker compose up --build
+```
+
+Then open `http://localhost:3000/health`: `{"status":"ok"}`.
+`docker ps` should show the container as `(healthy)` after about 30 seconds.
+Stop with `Ctrl + C`, then `docker compose down`.
+
+## Deploying
+
+Push to `main`. The pipeline does the rest. Progress and results are in the **Actions** tab. Secrets (AWS keys, server IP, SSH key) are stored as GitHub repository secrets, never in the code. Full details are in [DEPLOYMENT.md](DEPLOYMENT.md).
 
 ---
 
-## 3. The Assignment
+## Decisions I made
 
-### Part 1 - Containerise the App
+| Decision | Choice | Why |
+|---|---|---|
+| Base image | `node:22-alpine` | Same Node version as development, about 150 MB instead of about 1 GB. Trade-off: Alpine uses a different C library, which this Express-only app doesn't depend on |
+| Installing libraries | `npm ci --omit=dev` | Exact versions from `package-lock.json` every time, no test tools in production |
+| Layer order | Copy `package*.json` and install before copying the code | Docker reuses the install layer, so code-only changes rebuild in seconds |
+| User | `USER node` | The app doesn't run as root, so an attacker who breaks in gets very limited powers |
+| Start command | `CMD ["node", "index.js"]` plus `init: true` | Node as PID 1 ignored stop signals (I saw Ctrl + C fail); Docker's init helper passes them on so the container stops cleanly |
+| `.dockerignore` | `**/node_modules` | A plain `node_modules` missed `app/node_modules`; I spotted it because the build context was 27 MB instead of 172 B |
+| Ports | `${HOST_PORT}:${PORT}` from `.env` | One compose file: 3000 on laptops (the brief), 80 on the server (the server's own `.env`) |
+| Cloud | AWS EC2 + ECR, Ubuntu LTS | Existing account with credits; Docker installs with one command on Ubuntu |
+| Registry access | IAM user (push only) + IAM role on the server (pull only) | Least privilege: each identity can touch only the one repository; the server holds no keys |
+| SSH from the pipeline | Open port 22 for the runner's `/32` during the deploy, always close it after | Keeps SSH "my IP only" while still letting GitHub deploy |
+| Image labels | Commit ID for every build, `previous` / `latest` on the server | Every image is traceable to its code, and rollback always knows what to go back to |
+| Bonus | Automatic rollback, **tested** by deploying a deliberately broken image (Actions run #5) | A rollback you've never seen work is only a hope |
 
-**Deliverables:** A `Dockerfile` and a `docker-compose.yml` in the root of your repository.
+## What I would improve next
 
-**Dockerfile requirements:**
-
-- The app must run inside a Docker container.
-- The container must accept a `PORT` environment variable.
-- The container must **not** run as the `root` user.
-
-**Docker Compose requirements:**
-
-- Define the app as a service in `docker-compose.yml`.
-- Map port `3000` on the host to the container.
-- Pass the `PORT` variable via an `.env` file (include a `.env.example` with placeholder values).
-- Running the following must start a working API:
-  ```bash
-  docker compose up --build
-  ```
-
----
-
-### Part 2 - Automate the Pipeline
-
-**Deliverable:** A `.github/workflows/deploy.yml` GitHub Actions workflow.
-
-The pipeline should test, build, push, deploy, and then verify the release with a health check on every push to `main`. If the health check fails, roll back to the previous image and fail the workflow.
-
-Additional requirements:
-
-- Secrets (SSH key, registry token) must be stored as **GitHub repository secrets**, never in the code.
-- Add a short comment above each step in the YAML explaining what it does.
-
----
-
-## 4. Monitoring and Observability
-
-**Deliverable:** A short `OBSERVABILITY.md` or a clearly documented section in `DEPLOYMENT.md`.
-
-Add a simple monitoring and observability setup for the deployed app so it is easy to tell when the service is unhealthy or behaving badly.
-
-Requirements:
-
-- Capture application logs in a way that makes them easy to review later.
-- Add at least one health check, alert, or monitoring signal for the deployed service.
-- Document how you would spot a failed deployment, a crash, or rising error rates.
-
----
-
-### Part 3 - Deploy to the Cloud
-
-**Deliverable:** A running service on a cloud platform and a short `DEPLOYMENT.md` explaining your setup.
-
-Use **AWS, GCP, Azure, or any other cloud provider you are familiar with**. Provision the following (via the cloud console is fine):
-
-- A **virtual machine** (e.g. AWS EC2 `t2.micro`, GCP `e2-micro`, Azure B1s) with Docker installed.
-- A **firewall / security group** that allows:
-  - HTTP on port 80 from anywhere
-  - SSH on port 22 **from your IP only**, not open to the world
-- A **service account / IAM user or role** for the pipeline with only the permissions it needs.
-
-At submission time, `GET http://<your-server-ip>/health` must return `{ "status": "ok" }`.
-
-Document in `DEPLOYMENT.md`:
-
-- Which cloud provider and service you used, and why
-- How you set up the virtual machine
-- How you installed Docker and pulled your image
-- How to check if the container is running
-- How to view the application logs
-
----
-
-## 5. Bonus (Optional)
-
-Pick **one** of the following if you want to go further:
-
-- **Use Terraform** (or your cloud's IaC tool) to provision the VM and firewall rules instead of the console.
-- **Add a cloud monitoring alarm** (e.g. AWS CloudWatch, GCP Cloud Monitoring, Azure Monitor) that triggers if `/health` stops responding.
-- **Implement a rollback step** in the pipeline that re-deploys the previous image if the health check fails after deploy.
-
-Describe what you added and why in your `DEPLOYMENT.md`.
-
----
-
-## 6. Submission Instructions
-
-1. **Fork** this repository.
-2. Complete all three parts in your fork.
-3. **Replace this README** with your own documentation (architecture overview, setup steps, decisions made).
-4. Submit your repo link via the [online form](https://forms.cloud.microsoft/e/f3FF83LVz3).
-
----
-
-## ⚠️ Pre-Submission Checklist
-
-- [ ] `docker compose up --build` starts the app locally
-- [ ] A `.env.example` file is committed (the real `.env` is not)
-- [ ] At least one successful pipeline run is visible in the GitHub Actions tab
-- [ ] `GET /health` on your cloud server's public IP returns 200
-- [ ] No secrets or `.pem` files committed to the repository
-- [ ] SSH port 22 is **not** open to the world (`0.0.0.0/0`)
-- [ ] `DEPLOYMENT.md` is present and covers the four points in Part 3
-- [ ] `OBSERVABILITY.md` or the observability section in `DEPLOYMENT.md` explains monitoring and logging
-- [ ] This README has been replaced with your own documentation
-- [ ] Commit history shows progress over time (not a single upload commit)
+- Use **GitHub OIDC** instead of a long-lived AWS access key.
+- Add a **CloudWatch alarm** on `/health` that emails when the service is down.
+- Give the server an **Elastic IP** so its address survives a stop/start.
+- Use **AWS Systems Manager** instead of SSH for deploys, removing the SSH door completely.
+- Define the server and firewall with **Terraform**.
