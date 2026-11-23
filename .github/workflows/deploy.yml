@@ -4,6 +4,7 @@ name: Deploy
 on:
   push:
     branches: [main]
+
 jobs:
   # Job 1: run the tests. If they fail, nothing is built or deployed.
   test:
@@ -25,7 +26,7 @@ jobs:
       - run: npm test
         working-directory: app
 
-          # Job 2: build the image and upload it to the ECR shelf. Runs only if the tests passed.
+  # Job 2: build the image and upload it to the ECR shelf. Runs only if the tests passed.
   build:
     needs: test
     runs-on: ubuntu-latest
@@ -48,7 +49,7 @@ jobs:
           docker build -t 413724559765.dkr.ecr.eu-west-1.amazonaws.com/kora-analytics-api:${{ github.sha }} .
           docker push 413724559765.dkr.ecr.eu-west-1.amazonaws.com/kora-analytics-api:${{ github.sha }}
 
-    # Job 3: put the new image on the server. Runs only if the build succeeded.
+  # Job 3: put the new image on the server. Runs only if the build succeeded.
   deploy:
     needs: build
     runs-on: ubuntu-latest
@@ -66,15 +67,40 @@ jobs:
       # Open port 22 on the firewall for this runner's address only (/32)
       - run: aws ec2 authorize-security-group-ingress --group-id sg-0658a1bd6a8235984 --protocol tcp --port 22 --cidr $RUNNER_IP/32
 
-
       # Save the server key from GitHub secrets into a file that ssh can use
       - run: |
           echo "${{ secrets.EC2_SSH_KEY }}" > key.pem
           chmod 600 key.pem
 
-      # Test the login by running one harmless command on the server
-      - run: ssh -i key.pem -o StrictHostKeyChecking=accept-new ubuntu@${{ secrets.EC2_HOST }} "echo Connected to the server"
+      # On the server: label the running image "previous", download the new one, restart the app with it
+      - run: |
+          ssh -i key.pem -o StrictHostKeyChecking=accept-new ubuntu@${{ secrets.EC2_HOST }} "
+            aws ecr get-login-password --region eu-west-1 | sudo docker login --username AWS --password-stdin 413724559765.dkr.ecr.eu-west-1.amazonaws.com &&
+            sudo docker pull 413724559765.dkr.ecr.eu-west-1.amazonaws.com/kora-analytics-api:${{ github.sha }} &&
+            sudo docker tag kora-analytics-api:latest kora-analytics-api:previous &&
+            sudo docker tag 413724559765.dkr.ecr.eu-west-1.amazonaws.com/kora-analytics-api:${{ github.sha }} kora-analytics-api:latest &&
+            cd ~/AmaliTech-DEG-Project-based-challenges && git pull &&
+            sudo docker compose up -d --no-build
+          "
 
-      # Always lock the door again, even if an earlier step failed
+      # Health check: ask the live app for /health. Try up to 10 times, 3 seconds apart.
+      - id: health
+        run: |
+          for i in 1 2 3 4 5 6 7 8 9 10; do
+            if curl -fsS http://${{ secrets.EC2_HOST }}/health; then exit 0; fi
+            sleep 3
+          done
+          exit 1
+
+      # Rollback: if the health check failed, put the previous image back and restart the app
+      - if: failure() && steps.health.outcome == 'failure'
+        run: |
+          ssh -i key.pem -o StrictHostKeyChecking=accept-new ubuntu@${{ secrets.EC2_HOST }} "
+            sudo docker tag kora-analytics-api:previous kora-analytics-api:latest &&
+            cd ~/AmaliTech-DEG-Project-based-challenges &&
+            sudo docker compose up -d --no-build
+          "
+
+      # Always lock the door again, even if an earlier step failed (this must stay the last step)
       - if: always()
         run: aws ec2 revoke-security-group-ingress --group-id sg-0658a1bd6a8235984 --protocol tcp --port 22 --cidr $RUNNER_IP/32
