@@ -1,0 +1,26 @@
+name: Deploy
+
+# Run this pipeline every time code is pushed to the main branch
+on:
+  push:
+    branches: [main]
+jobs:
+  # Job 1: run the tests. If they fail, nothing is built or deployed.
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      # Download the repository's code onto GitHub's computer
+      - uses: actions/checkout@v5
+
+      # Install Node.js 22, the same version the Dockerfile uses
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+
+      # Install the exact library versions from package-lock.json
+      - run: npm ci
+        working-directory: app
+
+      # Run the app's 4 tests
+      - run: npm test
+        working-directory: app
