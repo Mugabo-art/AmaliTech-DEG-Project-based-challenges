@@ -17,7 +17,7 @@ Developer pushes to main
         │
         ▼
 GitHub Actions  (.github/workflows/deploy.yml)
-  1. test    npm ci + npm test (4 tests)
+  1. test    npm ci + npm test (5 tests)
   2. build   docker build, tag = commit ID, push to Amazon ECR
   3. deploy  open SSH for the runner's IP only
              └─ on the server: tag current image "previous", pull new image,
